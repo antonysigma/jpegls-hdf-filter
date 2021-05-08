@@ -11,6 +11,7 @@
 #include <array>
 #include <iostream>
 #include <numeric>
+#include <tuple>
 #include <vector>
 
 #include "charls/charls.h"
@@ -21,31 +22,42 @@ ThreadPool* filter_pool = nullptr;
 
 using std::vector;
 
+namespace {
+
 // Temporary unofficial filter ID
 const H5Z_filter_t H5Z_FILTER_JPEGLS = 32012;
+
+std::tuple<int, size_t, int, int>
+getParams(const size_t cd_nelmts, const unsigned int cd_values[]) {
+    if (cd_nelmts <= 3 || cd_values[0] == 0) {
+        return {-1, 0, 0, 0};
+    }
+
+    int length = cd_values[0];
+    size_t nblocks = cd_values[1];
+    int typesize = cd_values[2];
+    int lossy = cd_values[3];
+
+    static bool printed = false;
+    if (!printed) {
+        std::cerr << "length = " << length << "; nblocks = " << nblocks
+                  << "; typesize = " << typesize << "; lossy = " << lossy << std::endl;
+
+        printed = true;
+    }
+
+    return {length, nblocks, typesize, lossy};
+}
+
+}  // namespace
 
 size_t
 codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[], size_t nbytes,
              size_t* buf_size, void** buf) {
-    int length = 1;
-    size_t nblocks = 32;  // number of time series if encoding time-major chunks
-    int typesize = 1;
-    int lossy = 0;
-    if (cd_nelmts > 3 && cd_values[0] > 0) {
-        length = cd_values[0];
-        nblocks = cd_values[1];
-        typesize = cd_values[2];
-        lossy = cd_values[3];
+    const auto [length, nblocks, typesize, lossy] = getParams(cd_nelmts, cd_values);
 
-        static bool printed = false;
-        if (!printed) {
-            std::cerr << "length = " << length << "; nblocks = " << nblocks
-                      << "; typesize = " << typesize << "; lossy = " << lossy << std::endl;
-
-            printed = true;
-        }
-    } else {
-        printf("Error: Incorrect number of filter parameters specified. Aborting.\n");
+    if (length == -1) {
+        std::cerr << "Error: Incorrect number of filter parameters specified. Aborting.\n";
         return -1;
     }
 
@@ -164,17 +176,13 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
             in_buf = reinterpret_cast<unsigned char*>(realloc(*buf, compressed_size));
             *buf = in_buf;
         }
-        std::cerr << "compressed_size = " << compressed_size << std::endl;
-
-        std::cerr << "offsets = ";
 
         auto header = reinterpret_cast<uint32_t*>(in_buf);
-        //#pragma omp parallel for
+#pragma omp parallel for
         for (size_t block = 0; block < subchunks; block++) {
             const auto offset = std::accumulate(
                 local_out.begin(), local_out.begin() + block, header_size,
                 [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
-            std::cerr << offset << ',';
 
             const auto& local_buf = local_out[block];
 
@@ -184,8 +192,6 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
             // Write payload
             std::copy(local_buf.begin(), local_buf.end(), in_buf + offset);
         }
-
-        std::cerr << std::endl;
 
         *buf_size = compressed_size;
 
