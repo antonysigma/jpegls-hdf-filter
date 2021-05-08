@@ -11,6 +11,7 @@
 #include <array>
 #include <iostream>
 #include <vector>
+#include <numeric>
 
 #include "charls/charls.h"
 #include "threadpool.h"
@@ -26,8 +27,6 @@ const H5Z_filter_t H5Z_FILTER_JPEGLS = 32012;
 size_t
 codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[], size_t nbytes,
              size_t* buf_size, void** buf) {
-    filter_pool->lock_buffers();
-
     int length = 1;
     size_t nblocks = 32;  // number of time series if encoding time-major chunks
     int typesize = 1;
@@ -57,6 +56,7 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
     const size_t remainder = nblocks - lblocks * subchunks;
 
     if (flags & H5Z_FLAG_REVERSE) {
+        filter_pool->lock_buffers();
         /* Input */
         unsigned char* in_buf = (unsigned char*)realloc(*buf, nblocks * length * typesize * 2);
         *buf = in_buf;
@@ -117,60 +117,61 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
     } else {
         /* Output */
 
-        unsigned char* in_buf = (unsigned char*)*buf;
+        auto in_buf = reinterpret_cast<unsigned char*>(*buf);
 
-        uint32_t block_size[subchunks];
-        unsigned char* local_out[subchunks];
+        std::vector<uint32_t> block_size(subchunks);
+        std::vector<std::vector<unsigned char>> local_out(subchunks);
 
-        vector<std::future<void>> futures;
+#pragma omp parallel for
         for (size_t block = 0; block < subchunks; block++) {
-            size_t own_blocks = (block < remainder ? 1 : 0) + lblocks;
-            local_out[block] =
-                filter_pool->get_global_buffer(block, own_blocks * length * typesize + 8192);
+            const size_t own_blocks = (block < remainder ? 1 : 0) + lblocks;
+            auto& local_buf = local_out[block];
 
-            futures.emplace_back(filter_pool->enqueue([&, block, own_blocks] {
-                JlsParameters params = JlsParameters();
+            const auto reserved_size = own_blocks * length * typesize;
+            local_buf.resize(reserved_size + 8192);
+
+            auto params = [&]() -> const JlsParameters {
+                auto params = JlsParameters();
                 params.width = length;
                 params.height = own_blocks;
                 params.bitsPerSample = typesize * 8;
                 params.components = 1;
                 params.allowedLossyError = lossy;
-                size_t csize;
-                CharlsApiResultType ret = JpegLsEncode(
-                    local_out[block], own_blocks * length * typesize + 8192, &csize,
-                    in_buf + typesize * length *
-                                 ((block < remainder) ? block * (lblocks + 1)
-                                                      : (remainder * (lblocks + 1) +
-                                                         (block - remainder) * lblocks)),
-                    own_blocks * length * typesize, &params, errMsg);
-                if (ret != CharlsApiResultType::OK) {
-                    fprintf(stderr, "JPEG-LS error: %s\n", errMsg);
-                }
-                block_size[block] = csize;
-            }));
-        }
-        for (size_t i = 0; i < futures.size(); i++) {
-            futures[i].wait();
+                return params;
+            }();
+
+            size_t csize;
+            CharlsApiResultType ret = JpegLsEncode(
+                local_buf.data(), local_buf.size(), &csize,
+                in_buf + typesize * length *
+                             ((block < remainder)
+                                  ? block * (lblocks + 1)
+                                  : (remainder * (lblocks + 1) + (block - remainder) * lblocks)),
+                reserved_size, &params, errMsg);
+            if (ret != CharlsApiResultType::OK) {
+                fprintf(stderr, "JPEG-LS error: %s\n", errMsg);
+            }
+            local_buf.resize(csize);
         }
 
-        size_t compr_size = header_size;
-        for (size_t block = 0; block < subchunks; block++) {
-            compr_size += block_size[block];
-        }
+        const auto compr_size =
+            std::accumulate(local_out.begin(), local_out.end(), header_size,
+                            [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
 
         if (compr_size > nbytes) {
             in_buf = (unsigned char*)realloc(*buf, compr_size);
             *buf = in_buf;
         }
 
-        memcpy(in_buf, (unsigned char*)block_size, header_size);
+        std::copy_n(block_size.begin(), header_size, in_buf);
+
         size_t offset = header_size;
-        for (size_t block = 0; block < subchunks; block++) {
-            memcpy(in_buf + offset, local_out[block], block_size[block]);
-            offset += block_size[block];
+        for (auto&& x : local_out) {
+            std::copy(x.begin(), x.end(), in_buf + offset);
+            offset += x.size();
         }
 
-        size_t compressed_size = offset;
+        const size_t compressed_size = offset;
         *buf_size = compressed_size;
 
         filter_pool->unlock_buffers();
@@ -226,8 +227,8 @@ h5jpegls_set_local(hid_t dcpl, hid_t type, hid_t) {
     const unsigned near_lossy = values[1];
 
     if (near_lossy < 0) {
-        std::cerr << "parameter [near_lossy] must not be negative. Found = "
-                  << near_lossy << std::endl;
+        std::cerr << "parameter [near_lossy] must not be negative. Found = " << near_lossy
+                  << std::endl;
         return -1;
     }
 
