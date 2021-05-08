@@ -10,8 +10,8 @@
 
 #include <array>
 #include <iostream>
-#include <vector>
 #include <numeric>
+#include <vector>
 
 #include "charls/charls.h"
 #include "threadpool.h"
@@ -48,14 +48,15 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
         printf("Error: Incorrect number of filter parameters specified. Aborting.\n");
         return -1;
     }
-    char errMsg[256];
 
-    size_t subchunks = std::min(size_t(8), nblocks);
+    const size_t subchunks = std::min(size_t(24), nblocks);
     const size_t lblocks = nblocks / subchunks;
     const size_t header_size = 4 * subchunks;
     const size_t remainder = nblocks - lblocks * subchunks;
 
     if (flags & H5Z_FLAG_REVERSE) {
+        char errMsg[256];
+
         filter_pool->lock_buffers();
         /* Input */
         unsigned char* in_buf = (unsigned char*)realloc(*buf, nblocks * length * typesize * 2);
@@ -141,6 +142,7 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
             }();
 
             size_t csize;
+            char errMsg[256];
             CharlsApiResultType ret = JpegLsEncode(
                 local_buf.data(), local_buf.size(), &csize,
                 in_buf + typesize * length *
@@ -149,7 +151,7 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
                                   : (remainder * (lblocks + 1) + (block - remainder) * lblocks)),
                 reserved_size, &params, errMsg);
             if (ret != CharlsApiResultType::OK) {
-                fprintf(stderr, "JPEG-LS error: %s\n", errMsg);
+                std::cerr << "JPEG-LS error: " << errMsg << '\n';
             }
             local_buf.resize(csize);
         }
@@ -159,21 +161,31 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
                             [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
 
         if (compressed_size > nbytes) {
-            in_buf = (unsigned char*)realloc(*buf, compressed_size);
+            in_buf = reinterpret_cast<unsigned char*>(realloc(*buf, compressed_size));
             *buf = in_buf;
         }
+        std::cerr << "compressed_size = " << compressed_size << std::endl;
 
-        std::copy_n(block_size.begin(), header_size, in_buf);
+        std::cerr << "offsets = ";
 
-#pragma omp parallel for
+        auto header = reinterpret_cast<uint32_t*>(in_buf);
+        //#pragma omp parallel for
         for (size_t block = 0; block < subchunks; block++) {
-            const auto offset =
-                std::accumulate(local_out.begin(), local_out.begin() + block, header_size,
-                            [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
+            const auto offset = std::accumulate(
+                local_out.begin(), local_out.begin() + block, header_size,
+                [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
+            std::cerr << offset << ',';
 
-            auto& x = local_out[block];
-            std::copy(x.begin(), x.end(), in_buf + offset);
+            const auto& local_buf = local_out[block];
+
+            // Write header
+            header[block] = local_buf.size();
+
+            // Write payload
+            std::copy(local_buf.begin(), local_buf.end(), in_buf + offset);
         }
+
+        std::cerr << std::endl;
 
         *buf_size = compressed_size;
 
