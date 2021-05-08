@@ -28,17 +28,18 @@ namespace {
 // Temporary unofficial filter ID
 const H5Z_filter_t H5Z_FILTER_JPEGLS = 32012;
 
-std::tuple<int, size_t, int>
+std::tuple<int, size_t, int, int>
 getParams(const size_t cd_nelmts, const unsigned int cd_values[]) {
     if (cd_nelmts <= 3 || cd_values[0] == 0) {
-        return {-1, 0, 0};
+        return {-1, 0, 0, 0};
     }
 
     int length = cd_values[0];
     size_t nblocks = cd_values[1];
     int typesize = cd_values[2];
+    int lossy = cd_values[3];
 
-    return {length, nblocks, typesize};
+    return {length, nblocks, typesize, lossy};
 }
 
 }  // namespace
@@ -46,7 +47,7 @@ getParams(const size_t cd_nelmts, const unsigned int cd_values[]) {
 size_t
 codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[], size_t nbytes,
              size_t* buf_size, void** buf) {
-    const auto [length, nblocks, typesize] = getParams(cd_nelmts, cd_values);
+    const auto [length, nblocks, typesize, lossy] = getParams(cd_nelmts, cd_values);
 
     if (length == -1) {
         std::cerr << "Error: Incorrect number of filter parameters specified. Aborting.\n";
@@ -141,6 +142,7 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
                 params.height = own_blocks;
                 params.bitsPerSample = typesize * 8;
                 params.components = 1;
+                params.allowedLossyError = lossy;
                 return params;
             }();
 
@@ -219,6 +221,7 @@ herr_t h5jpegls_set_local(hid_t dcpl, hid_t type, hid_t) {  // NOLINT
     }
 
     const bool byte_mode = values.size() > 0 && values[0] != 0;
+    const unsigned near_lossy = values[1];
 
     constexpr unsigned int minus_one = -1;
 
@@ -268,7 +271,7 @@ const H5Z_class2_t H5Z_JPEGLS[1] = {{
     H5Z_FILTER_JPEGLS,                                     /* Filter id number */
     1,                                                     /* encoder_present flag (set to true) */
     1,                                                     /* decoder_present flag (set to true) */
-    "HDF5 JPEG-LS filter v0.2",                            /* Filter name for debugging */
+    "HDF5 JPEG-LS filter v1.0",                            /* Filter name for debugging */
     nullptr,                                               /* The "can apply" callback     */
     static_cast<H5Z_set_local_func_t>(h5jpegls_set_local), /* The "set local" callback */
     static_cast<H5Z_func_t>(codec_filter),                 /* The actual filter function */
