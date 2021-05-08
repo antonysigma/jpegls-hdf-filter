@@ -50,7 +50,7 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
     }
     char errMsg[256];
 
-    size_t subchunks = std::min(size_t(24), nblocks);
+    size_t subchunks = std::min(size_t(8), nblocks);
     const size_t lblocks = nblocks / subchunks;
     const size_t header_size = 4 * subchunks;
     const size_t remainder = nblocks - lblocks * subchunks;
@@ -154,27 +154,29 @@ codec_filter(unsigned int flags, size_t cd_nelmts, const unsigned int cd_values[
             local_buf.resize(csize);
         }
 
-        const auto compr_size =
+        const auto compressed_size =
             std::accumulate(local_out.begin(), local_out.end(), header_size,
                             [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
 
-        if (compr_size > nbytes) {
-            in_buf = (unsigned char*)realloc(*buf, compr_size);
+        if (compressed_size > nbytes) {
+            in_buf = (unsigned char*)realloc(*buf, compressed_size);
             *buf = in_buf;
         }
 
         std::copy_n(block_size.begin(), header_size, in_buf);
 
-        size_t offset = header_size;
-        for (auto&& x : local_out) {
+#pragma omp parallel for
+        for (size_t block = 0; block < subchunks; block++) {
+            const auto offset =
+                std::accumulate(local_out.begin(), local_out.begin() + block, header_size,
+                            [](const auto& a, const auto& b) -> size_t { return a + b.size(); });
+
+            auto& x = local_out[block];
             std::copy(x.begin(), x.end(), in_buf + offset);
-            offset += x.size();
         }
 
-        const size_t compressed_size = offset;
         *buf_size = compressed_size;
 
-        filter_pool->unlock_buffers();
         return compressed_size;
     }
 }
