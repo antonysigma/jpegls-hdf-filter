@@ -15,6 +15,7 @@ charls_inc = charls_proj.get_variable('charls_inc')
 
 hdf5_dep = dependency('hdf5-serial')
 threads_dep = dependency('threads')
+openmp_dep = dependency('openmp')
 
 h5jpegls_lib = library('h5jpegls',
     sources: [
@@ -32,6 +33,7 @@ h5jpegls_lib = library('h5jpegls',
     dependencies: [
         hdf5_dep,
         threads_dep,
+        openmp_dep,
     ],
 )
 
