@@ -173,7 +173,8 @@ herr_t h5jpegls_set_local(hid_t dcpl, hid_t type, hid_t) {  // NOLINT
 
     auto cb_values = [&]() -> const std::array<unsigned int, 4> {
         unsigned int length = chunkdims[ndims - 1];
-        unsigned int nblocks = (ndims == 1) ? 1 : chunkdims[ndims - 2];
+        unsigned int nblocks = (ndims == 1) ? 1 : std::accumulate(
+                chunkdims, chunkdims + ndims - 1, 1, std::multiplies<int>());
 
         unsigned int typesize = H5Tget_size(type);
         if (typesize == 0) {
